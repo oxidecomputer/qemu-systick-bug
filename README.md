@@ -2,7 +2,8 @@
 
 This repository demonstrates a bug with respect to QEMU's handling of
 SysTick on ARM -- or at the very least, an inconsistency with respect to
-hardware.
+hardware.  (This issue has been filed with QEMU as
+<a href="https://bugs.launchpad.net/qemu/+bug/1872237">#1872237</a>.)
 
 ## Issue
 
