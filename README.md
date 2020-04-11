@@ -1,135 +1,239 @@
-# `cortex-m-quickstart`
+# qemu-systick-bug
 
-> A template for building applications for ARM Cortex-M microcontrollers
+This repository demonstrates a bug with respect to QEMU's handling of
+SysTick on ARM -- or at the very least, an inconsistency with respect to
+hardware.
 
-This project is developed and maintained by the [Cortex-M team][team].
+## Issue
 
-## Dependencies
+Take this Rust program:
 
-To build embedded programs using this template you'll need:
+```rust
+#![no_std]
+#![no_main]
 
-- Rust 1.31, 1.30-beta, nightly-2018-09-13 or a newer toolchain. e.g. `rustup
-  default beta`
+extern crate panic_semihosting;
 
-- The `cargo generate` subcommand. [Installation
-  instructions](https://github.com/ashleygwilliams/cargo-generate#installation).
+use cortex_m_rt::entry;
+use cortex_m_semihosting::hprintln;
+use cortex_m::peripheral::syst::SystClkSource;
+use cortex_m::peripheral::SYST;
 
-- `rust-std` components (pre-compiled `core` crate) for the ARM Cortex-M
-  targets. Run:
-
-``` console
-$ rustup target add thumbv6m-none-eabi thumbv7m-none-eabi thumbv7em-none-eabi thumbv7em-none-eabihf
-```
-
-## Using this template
-
-**NOTE**: This is the very short version that only covers building programs. For
-the long version, which additionally covers flashing, running and debugging
-programs, check [the embedded Rust book][book].
-
-[book]: https://rust-embedded.github.io/book
-
-0. Before we begin you need to identify some characteristics of the target
-  device as these will be used to configure the project:
-
-- The ARM core. e.g. Cortex-M3.
-
-- Does the ARM core include an FPU? Cortex-M4**F** and Cortex-M7**F** cores do.
-
-- How much Flash memory and RAM does the target device has? e.g. 256 KiB of
-  Flash and 32 KiB of RAM.
-
-- Where are Flash memory and RAM mapped in the address space? e.g. RAM is
-  commonly located at address `0x2000_0000`.
-
-You can find this information in the data sheet or the reference manual of your
-device.
-
-In this example we'll be using the STM32F3DISCOVERY. This board contains an
-STM32F303VCT6 microcontroller. This microcontroller has:
-
-- A Cortex-M4F core that includes a single precision FPU
-
-- 256 KiB of Flash located at address 0x0800_0000.
-
-- 40 KiB of RAM located at address 0x2000_0000. (There's another RAM region but
-  for simplicity we'll ignore it).
-
-1. Instantiate the template.
-
-``` console
-$ cargo generate --git https://github.com/rust-embedded/cortex-m-quickstart
- Project Name: app
- Creating project called `app`...
- Done! New project created /tmp/app
-
-$ cd app
-```
-
-2. Set a default compilation target. There are four options as mentioned at the
-   bottom of `.cargo/config`. For the STM32F303VCT6, which has a Cortex-M4F
-   core, we'll pick the `thumbv7em-none-eabihf` target.
-
-``` console
-$ tail -n6 .cargo/config
-```
-
-``` toml
-[build]
-# Pick ONE of these compilation targets
-# target = "thumbv6m-none-eabi"    # Cortex-M0 and Cortex-M0+
-# target = "thumbv7m-none-eabi"    # Cortex-M3
-# target = "thumbv7em-none-eabi"   # Cortex-M4 and Cortex-M7 (no FPU)
-target = "thumbv7em-none-eabihf" # Cortex-M4F and Cortex-M7F (with FPU)
-```
-
-3. Enter the memory region information into the `memory.x` file.
-
-``` console
-$ cat memory.x
-/* Linker script for the STM32F303VCT6 */
-MEMORY
+fn delay(syst: &mut cortex_m::peripheral::SYST, ms: u32)
 {
-  /* NOTE 1 K = 1 KiBi = 1024 bytes */
-  FLASH : ORIGIN = 0x08000000, LENGTH = 256K
-  RAM : ORIGIN = 0x20000000, LENGTH = 40K
+    /*
+     * Configured for the LM3S6965, which has a default CPU clock of 12 Mhz
+     */
+    let reload = 12_000 * ms;
+
+    syst.set_reload(reload);
+    syst.clear_current();
+    syst.enable_counter();
+
+    hprintln!("waiting for {} ms (SYST_CVR={}) ...",
+        ms, SYST::get_current()
+    ).unwrap();
+
+    while !syst.has_wrapped() {}
+
+    hprintln!("  ... done (SYST_CVR={})\n", SYST::get_current()).unwrap();
+
+    syst.disable_counter();
+}
+
+#[entry]
+fn main() -> ! {
+    let p = cortex_m::Peripherals::take().unwrap();
+    let mut syst = p.SYST;
+
+    syst.set_clock_source(SystClkSource::Core);
+
+    loop {
+        delay(&mut syst, 1000);
+        delay(&mut syst, 100);
+    }
 }
 ```
 
-4. Build the template application or one of the examples.
+This program should oscillate between waiting for one second and waiting
+for 100 milliseconds.  Under hardware, this is more or less what it does
+(depending on core clock frequency); e.g., from an STM32F4107 (connected via
+OCD and with semi-hosting enabled):
 
-``` console
-$ cargo build
+```
+waiting for 1000 ms (SYST_CVR=11999949) ...
+  ... done (SYST_CVR=11999902)
+
+waiting for 100 ms (SYST_CVR=1199949) ...
+  ... done (SYST_CVR=1199897)
+
+waiting for 1000 ms (SYST_CVR=11999949) ...
+  ... done (SYST_CVR=11999885)
+
+waiting for 100 ms (SYST_CVR=1199949) ...
+  ... done (SYST_CVR=1199897)
+
+waiting for 1000 ms (SYST_CVR=11999949) ...
+  ... done (SYST_CVR=11999885)
+
 ```
 
-## VS Code
+Under QEMU, however, this is what it does:
 
-This template includes launch configurations for debugging CortexM programs with Visual Studio Code located in the `.vscode/` directory.  
-See [.vscode/README.md](./.vscode/README.md) for more information.  
-If you're not using VS Code, you can safely delete the directory from the generated project.
+```
+$ cargo run
+    Finished dev [unoptimized + debuginfo] target(s) in 0.03s
+     Running `qemu-system-arm -cpu cortex-m3 -machine lm3s6965evb -nographic -semihosting-config enable=on,target=native -kernel target/thumbv7m-none-eabi/debug/qemu-systick-bug`
+waiting for 1000 ms (SYST_CVR=11999658) ...
+  ... done (SYST_CVR=11986226)
 
-# License
+waiting for 100 ms (SYST_CVR=0) ...
+  ... done (SYST_CVR=1186560)
 
-This template is licensed under either of
+waiting for 1000 ms (SYST_CVR=1185996) ...
+  ... done (SYST_CVR=11997350)
 
-- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or
-  http://www.apache.org/licenses/LICENSE-2.0)
+waiting for 100 ms (SYST_CVR=0) ...
+  ... done (SYST_CVR=1186581)
+```
 
-- MIT license ([LICENSE-MIT](LICENSE-MIT) or http://opensource.org/licenses/MIT)
+In addition to the values being strangely wrong, the behavior is wrong:
+the first wait correctly waits for 1000 ms -- but the subsequent wait
+(which should be for 100 ms) is in fact 1000 ms, and the next wait (which
+should be for 1000 ms) is in fact 100 ms.  (That is, it appears as if
+the disposition is inverted.)
 
-at your option.
+The QEMU ARM emulation code does not reload SYST_CVR from SYST_RVR if
+ENABLE is not set in SYST_CSR.  This is very explicit; from
+<a href="https://github.com/qemu/qemu/blob/8bac3ba57eecc466b7e73dabf7d19328a59f684e/hw/timer/armv7m_systick.c#L42-L60">hw/timer/armv7m_systick.c</a>:
 
-## Contribution
+```c
+static void systick_reload(SysTickState *s, int reset)
+{
+    /* The Cortex-M3 Devices Generic User Guide says that "When the
+     * ENABLE bit is set to 1, the counter loads the RELOAD value from the
+     * SYST RVR register and then counts down". So, we need to check the
+     * ENABLE bit before reloading the value.
+     */
+    trace_systick_reload();
 
-Unless you explicitly state otherwise, any contribution intentionally submitted
-for inclusion in the work by you, as defined in the Apache-2.0 license, shall be
-dual licensed as above, without any additional terms or conditions.
+    if ((s->control & SYSTICK_ENABLE) == 0) {
+        return;
+    }
 
-## Code of Conduct
+    if (reset) {
+        s->tick = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    }
+    s->tick += (s->reload + 1) * systick_scale(s);
+    timer_mod(s->timer, s->tick);
+}
+```
 
-Contribution to this crate is organized under the terms of the [Rust Code of
-Conduct][CoC], the maintainer of this crate, the [Cortex-M team][team], promises
-to intervene to uphold that code of conduct.
+The statement in the code is stronger than the statement in the
+<a href="https://static.docs.arm.com/ddi0403/eb/DDI0403E_B_armv7m_arm.pdf">ARMv7-M Architecture Reference Manual</a> (sec B3.3.1):
 
-[CoC]: https://www.rust-lang.org/policies/code-of-conduct
-[team]: https://github.com/rust-embedded/wg#the-cortex-m-team
+> Writing to SYST_CVR clears both the register and the COUNTFLAG status
+> bit to zero. This causes the SysTick logic to reload SYST_CVR from SYST_RVR
+> on the next timer clock. A write to SYST_CVR does not trigger the
+> SysTick exception logic
+
+Note that this does not mention the behavior on a write to SYST_CVR when
+ENABLE is not set -- and in particular, does not say that writes to
+SYST_CVR will be ignored if SYST_CSR.ENABLE is not set.
+
+Section 3.3.1 does go on to say:
+
+> The SYST_CVR value is UNKNOWN on reset. Before enabling the SysTick counter,u
+> software must write the required counter value to SYST_RVR, and then write
+> to SYST_CVR. This clears SYST_CVR to zero. When enabled, the counter 
+> reloads the value from SYST_RVR, and counts down from that value, rather]
+> than from an arbitrary value.
+
+(This is more or less what has been quoted in the implementation of
+`systick_reload`, above.)  This note does **not** say, however, that writes
+to SYST_CVR will be discarded when not enabled, but rather that the counting
+will only begin (and the value in SYST_RVR loaded or reloaded) when
+SYST_CSR.ENABLE
+becomes set.
+
+While QEMU's behavior does not match that of the hardware (and is therefore
+at some level malfunctioning), there is additional behavior that is very
+clearly incorrect: once SYST_CSR.ENABLE is set, not only will SYST_CVR
+continue to return 0 (that is, the counter will not be enabled),
+SYST_CSR.COUNTFLAG will become set when the *old* value of SYST_RVR ticks
+have elapsed!  This is wrong in both regards: if SYST_CVR is not counting
+down, SYST_CSR.COUNTFLAG should never become set -- and it certainly
+shouldn't match a value of SYST_RVR that has been overwritten in the
+interim!
+
+In terms of fixing this, it's helpful to understand the
+<a
+href=https://lists.gnu.org/archive/html/qemu-devel/2015-05/msg01217.html">context
+around this change</a>:
+
+> Consider the following pseudo code to configure SYSTICK (The
+> recommended programming sequence from "the definitive guide to the
+> arm cortex-m3"):
+>    SYSTICK Reload Value Register = 0xffff
+>    SYSTICK Current Value Register = 0
+>    SYSTICK Control and Status Register = 0x7
+>
+> The pseudo code "SYSTICK Current Value Register = 0" leads to invoking
+> systick_reload(). As a consequence, the systick.tick member is updated
+> and the systick timer starts to count down when the ENABLE bit of
+> SYSTICK Control and Status Register is cleared.
+>
+> The worst case is that: during the system initialization, the reset
+> value of the SYSTICK Control and Status Register is 0x00000000. 
+> When the code "SYSTICK Current Value Register = 0" is executed, the
+> systick.tick member is accumulated with "(s->systick.reload + 1) *
+> systick_scale(s)". The systick_scale() gets the external_ref_clock
+> scale because the CLKSOURCE bit of the SYSTICK Control and Status
+> Register is cleared. This is the incorrect behavior because of the
+> code "SYSTICK Control and Status Register = 0x7". Actually, we want
+> the processor clock instead of the external reference clock.
+>
+> This incorrect behavior defers the generation of the first interrupt. 
+>
+> The patch fixes the above-mentioned issue by setting the systick.tick
+> member and modifying the systick timer only if the ENABLE bit of
+> the SYSTICK Control and Status Register is set.
+>
+> In addition, the Cortex-M3 Devices Generic User Guide mentioned that
+> "When ENABLE is set to 1, the counter loads the RELOAD value from the
+> SYST RVR register and then counts down". This patch adheres to the
+> statement of the user guide.
+
+This fix is simply incorrect -- or at the least, incomplete:
+a write to SYST_CVR must clear any cached state
+such that a subsequent write to SYST_CSR.ENABLE will correctly cause
+a reload.  Here is a diff that seems to solve the problem:
+
+```diff
+
+
+
+
+```
+
+## Building
+
+Assuming that one has the Rust toolchain for the `thumbv7em-none-eabi` target
+installed, it should build with `cargo build`.  For details on installing
+Rust (and this tool chain), consult the (excellent) <a
+href="https://rust-embedded.github.io/book/">Embedded Rust Book</a> -- 
+and in particular its <a
+href="https://rust-embedded.github.io/book/start/qemu.html">chapter on
+QEMU</a>.
+
+## Running under QEMU
+
+You can run it with `cargo run`, or, via the command line:
+
+```
+qemu-system-arm -cpu cortex-m3 \
+	-machine lm3s6965evb -nographic \
+	-semihosting-config enable=on,target=native \
+	-kernel ./target/thumbv7m-none-eabi/debug/qemu-systick-bug
+```
+
