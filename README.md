@@ -78,7 +78,7 @@ waiting for 1000 ms (SYST_CVR=11999949) ...
 
 ```
 
-Under QEMU, however, this is what it does:
+Under QEMU, however, it's behavior is quite different:
 
 ```
 $ cargo run
@@ -101,11 +101,13 @@ In addition to the values being strangely wrong, the behavior is wrong:
 the first wait correctly waits for 1000 ms -- but the subsequent wait
 (which should be for 100 ms) is in fact 1000 ms, and the next wait (which
 should be for 1000 ms) is in fact 100 ms.  (That is, it appears as if
-the disposition is inverted.)
+the periods of the two delays have been switched.)
 
-The QEMU ARM emulation code does not reload SYST_CVR from SYST_RVR if
-ENABLE is not set in SYST_CSR.  This is very explicit; from
-<a href="https://github.com/qemu/qemu/blob/8bac3ba57eecc466b7e73dabf7d19328a59f684e/hw/timer/armv7m_systick.c#L42-L60">hw/timer/armv7m_systick.c</a>:
+The problems is that the QEMU ARM emulation code does not reload SYST_CVR from
+SYST_RVR if ENABLE is not set in SYST_CSR -- and moreover, that SYST_RVR is
+not reloaded even when SYST_CSR.ENABLE becomes set.  This is very explicit;
+from <a
+href="https://github.com/qemu/qemu/blob/8bac3ba57eecc466b7e73dabf7d19328a59f684e/hw/timer/armv7m_systick.c#L42-L60">hw/timer/armv7m_systick.c</a>:
 
 ```c
 static void systick_reload(SysTickState *s, int reset)
@@ -168,7 +170,7 @@ interim!
 
 In terms of fixing this, it's helpful to understand the
 <a
-href=https://lists.gnu.org/archive/html/qemu-devel/2015-05/msg01217.html">context
+href="https://lists.gnu.org/archive/html/qemu-devel/2015-05/msg01217.html">context
 around this change</a>:
 
 > Consider the following pseudo code to configure SYSTICK (The
@@ -210,10 +212,26 @@ such that a subsequent write to SYST_CSR.ENABLE will correctly cause
 a reload.  Here is a diff that seems to solve the problem:
 
 ```diff
-
-
-
-
+diff --git a/hw/timer/armv7m_systick.c b/hw/timer/armv7m_systick.c
+index 74c58bcf24..3f7b267c2d 100644
+--- a/hw/timer/armv7m_systick.c
++++ b/hw/timer/armv7m_systick.c
+@@ -181,6 +181,15 @@ static MemTxResult systick_write(void *opaque, hwaddr addr,
+         break;
+     case 0x8: /* SysTick Current Value.  Writes reload the timer.  */
+         systick_reload(s, 1);
++
++        if ((s->control & SYSTICK_ENABLE) == 0) {
++            /*
++             * If we're not enabled, explicitly clear our tick value to
++             * assure that when we do become enabled, we correctly reload.
++             */
++            s->tick = 0;
++        }
++
+         s->control &= ~SYSTICK_COUNTFLAG;
+         break;
+     default:
 ```
 
 ## Building
