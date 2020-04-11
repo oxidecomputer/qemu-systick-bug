@@ -78,7 +78,7 @@ waiting for 1000 ms (SYST_CVR=11999949) ...
 
 ```
 
-Under QEMU, however, it's behavior is quite different:
+Under QEMU, however, its behavior is quite different:
 
 ```
 $ cargo run
@@ -104,9 +104,10 @@ should be for 1000 ms) is in fact 100 ms.  (That is, it appears as if
 the periods of the two delays have been switched.)
 
 The problems is that the QEMU ARM emulation code does not reload SYST_CVR from
-SYST_RVR if ENABLE is not set in SYST_CSR -- and moreover, that SYST_RVR is
-not reloaded even when SYST_CSR.ENABLE becomes set.  This is very explicit;
-from <a
+SYST_RVR if SYST_CSR.ENABLE is not set -- and moreover, that SYST_CVR is
+not reloaded from SYST_RVR even when SYST_CSR.ENABLE becomes set.  This is
+very explicit; from
+<a
 href="https://github.com/qemu/qemu/blob/8bac3ba57eecc466b7e73dabf7d19328a59f684e/hw/timer/armv7m_systick.c#L42-L60">hw/timer/armv7m_systick.c</a>:
 
 ```c
@@ -137,10 +138,10 @@ The statement in the code is stronger than the statement in the
 > Writing to SYST_CVR clears both the register and the COUNTFLAG status
 > bit to zero. This causes the SysTick logic to reload SYST_CVR from SYST_RVR
 > on the next timer clock. A write to SYST_CVR does not trigger the
-> SysTick exception logic
+> SysTick exception logic.
 
 Note that this does not mention the behavior on a write to SYST_CVR when
-ENABLE is not set -- and in particular, does not say that writes to
+SYST_CSR.ENABLE is not set -- and in particular, does *not* say that writes to
 SYST_CVR will be ignored if SYST_CSR.ENABLE is not set.
 
 Section 3.3.1 does go on to say:
@@ -155,8 +156,7 @@ Section 3.3.1 does go on to say:
 `systick_reload`, above.)  This note does **not** say, however, that writes
 to SYST_CVR will be discarded when not enabled, but rather that the counting
 will only begin (and the value in SYST_RVR loaded or reloaded) when
-SYST_CSR.ENABLE
-becomes set.
+SYST_CSR.ENABLE becomes set.
 
 While QEMU's behavior does not match that of the hardware (and is therefore
 at some level malfunctioning), there is additional behavior that is very
@@ -209,7 +209,8 @@ around this change</a>:
 This fix is simply incorrect -- or at the least, incomplete:
 a write to SYST_CVR must clear any cached state
 such that a subsequent write to SYST_CSR.ENABLE will correctly cause
-a reload.  Here is a diff that seems to solve the problem:
+a reload.  Here is a diff that solves the problem without re-introducing
+the behavior that the original fix was trying to correct:
 
 ```diff
 diff --git a/hw/timer/armv7m_systick.c b/hw/timer/armv7m_systick.c
